@@ -7,6 +7,7 @@
 #include <string>
 #include <Arduinojson.h> 
 #include <ESP32Time.h>
+#include <Preferences.h>
 
 /* Red WiFi */
 #define SSID "MiFibra-21E0"
@@ -39,8 +40,8 @@ NTPClient timeClient(ntpUDP);
 String formattedTime;
 String dayStamp;
 String timeStamp;
-String LimiteHoraInicio = "12:00";
-String LimiteHoraFin = "23:00";
+String LimiteHoraInicio;
+String LimiteHoraFin;
 int HoraInicioCheck, HoraFinCheck;
 
 //sincronizacion del RTC con NTP
@@ -59,10 +60,13 @@ int PorcentajeHumedad = 40;
 int contador;
 const int dry = 445;
 const int wet = 32;
-int TiempoRIEGO = 0;
-int HumedadRiego = 40;
-int LimiteRiego = 10;
-int LimiteHumedad = 40;  
+int TiempoRIEGO;
+int HumedadRiego;
+int LimiteRiego;
+int LimiteHumedad;  
+
+//Instancia para almacenar datos en memoria flash
+Preferences preferences;
 
 #define PinLed 2
 #define ValvulaRiegoVin 32
@@ -96,7 +100,7 @@ void setup() {
   timerAlarmDisable(timer1);
   timer2 = timerBegin(3, 80, true);
   timerAttachInterrupt(timer2, &onTimer2, true);
-  timerAlarmWrite(timer2, 1000, true);
+  timerAlarmWrite(timer2, 3000000, true);
   timerAlarmEnable(timer2);
   timerAlarmDisable(timer2);
   
@@ -106,6 +110,16 @@ void setup() {
   if (getLocalTime(&timeinfo)){
     rtc.setTimeStruct(timeinfo);
   }
+
+  //Guardar datos en memoria flash
+  preferences.begin("MiTerrazaIoT", false);
+
+  preferences.getUInt("LimiteRiego", 10);
+  preferences.getUInt("LimiteHumedad", 40);
+  preferences.getString("LimiteHoraInicio", "17:00");
+  preferences.getString("LimiteHoraFin", "23:00");
+  preferences.getBool("AUTO", true);
+  
 }
 
 void loop() {
@@ -133,6 +147,15 @@ void loop() {
     LimiteHoraFin = myFirebaseData.stringData();
     Firebase.set(myFirebaseData, "/OK", false);
     delay(1000);
+    preferences.putUInt("LimiteRiego", LimiteRiego);
+    preferences.putUInt("LimiteHumedad", LimiteHumedad);
+    preferences.putBool("RiegoAuto", AUTO);
+    preferences.putString("LimiteHoraInicio", LimiteHoraInicio);
+    preferences.putString("LimiteHoraFin", LimiteHoraFin);
+    preferences.end();
+
+
+    
   }
 
   Serial.println("Hora Inicio: ");
@@ -203,8 +226,8 @@ void loop() {
       else {
         timerAlarmEnable(timer1);
         if( ValvulaRiego != true){
-          digitalWrite(ValvulaRiegoGND, LOW);
           digitalWrite(ValvulaRiegoVin, HIGH);
+          digitalWrite(ValvulaRiegoGND, LOW);
           //Serial.println("Salida ValvulaVin: ");
           //Serial.println(ValvulaRiegoVin);
           //Serial.println("Salida ValvulaGND: ");
