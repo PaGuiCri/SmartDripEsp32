@@ -108,8 +108,6 @@ void setup() {
   }
 }
 
-//conentario
-
 void loop() {
 
   //Leer Hora
