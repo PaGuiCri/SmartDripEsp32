@@ -10,7 +10,7 @@
 #include <Preferences.h>
 
 /* Red WiFi */
-#define SSID "MiFibra-21E0"
+#define SSID "MiFibra-21E0_plus"
 #define PASS "MaGGyv9h"
 void InitWiFi();
 
@@ -100,7 +100,7 @@ void setup() {
   timerAlarmDisable(timer1);
   timer2 = timerBegin(3, 80, true);
   timerAttachInterrupt(timer2, &onTimer2, true);
-  timerAlarmWrite(timer2, 3000000, true);
+  timerAlarmWrite(timer2, 500000, true);
   timerAlarmEnable(timer2);
   timerAlarmDisable(timer2);
   
