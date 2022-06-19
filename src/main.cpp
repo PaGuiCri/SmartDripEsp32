@@ -10,7 +10,7 @@
 #include <Preferences.h>
 
 /* Red WiFi */
-#define SSID "MiFibra-21E0_plus"
+#define SSID "MiFibra-21E0_EXT"
 #define PASS "MaGGyv9h"
 void InitWiFi();
 
