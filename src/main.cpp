@@ -116,7 +116,7 @@ void setup() {
 
   preferences.getUInt("LimiteRiego", 10);
   preferences.getUInt("LimiteHumedad", 40);
-  preferences.getString("LimiteHoraInicio", "17:00");
+  preferences.getString("LimiteHoraIni", "17:00");
   preferences.getString("LimiteHoraFin", "23:00");
   preferences.getBool("AUTO", true);
   
@@ -150,12 +150,9 @@ void loop() {
     preferences.putUInt("LimiteRiego", LimiteRiego);
     preferences.putUInt("LimiteHumedad", LimiteHumedad);
     preferences.putBool("RiegoAuto", AUTO);
-    preferences.putString("LimiteHoraInicio", LimiteHoraInicio);
+    preferences.putString("LimiteHoraIni", LimiteHoraInicio);
     preferences.putString("LimiteHoraFin", LimiteHoraFin);
     preferences.end();
-
-
-    
   }
 
   Serial.println("Hora Inicio: ");
@@ -176,7 +173,6 @@ void loop() {
       TiempoDHT = millis();
     } else {
       Serial.println("Error DHT11");
-      
     }
     //Higro.set("HumedadSuelo", PorcentajeHumedad);
     Serial.println("Humedad suelo: "); Serial.print(PorcentajeHumedad); Serial.println("% ");
@@ -197,7 +193,6 @@ void loop() {
   if (AUTO != false){
 
     Serial.println("Riego AUTO ON");
-    
     bool CheckTimer = timerAlarmEnabled(timer1);
     delay(500);
 
