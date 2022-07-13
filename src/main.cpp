@@ -22,6 +22,10 @@ void InitWiFi();
 #define AUTHOR_PASSWORD "kcjbfgngmfgkcxtw"
 SMTPSession smtp;
 void smtpCallback(SMTP_Status status);
+void mensajeRiego();
+ESP_Mail_Session session;
+SMTP_Message message;
+SMTP_Message messageRiego;
 
 /* Firebase */
 #define DB_URL "terrazaiot-default-rtdb.europe-west1.firebasedatabase.app"     // URL de la base de datos.
@@ -80,7 +84,7 @@ Preferences preferences;
 #define ValvulaRiegoVin 32
 #define ValvulaRiegoGND 25
 
-bool AUTO, RiegoManualON, RiegoManualOFF, Ok, ValvulaRiego;
+bool AUTO, Ok, ValvulaRiego;
  
 void setup() {
   Serial.begin(9600);
@@ -121,25 +125,22 @@ void setup() {
 
   //Recuperar datos de memoria flash
   preferences.begin("MiTerrazaIoT", false);
-  preferences.getUInt("LimiteRiego", 10);
-  preferences.getUInt("LimiteHumedad", 40);
-  preferences.getString("LimiteHoraIni", "17:00");
-  preferences.getString("LimiteHoraFin", "23:00");
-  preferences.getBool("AUTO", true);
+  LimiteRiego = preferences.getUInt("LimiteRiego", 10);
+  LimiteHumedad = preferences.getUInt("LimiteHumedad", 40);
+  LimiteHoraInicio = preferences.getString("LimiteHoraIni", "17:00");
+  LimiteHoraFin = preferences.getString("LimiteHoraFin", "23:00");
+  AUTO = preferences.getBool("AUTO", true);
+  preferences.end();
 
   
-  smtp.debug(1);
-  smtp.callback(smtpCallback);
-  ESP_Mail_Session session;
+  //smtp.debug(1);
+  //smtp.callback(smtpCallback);
 
   session.server.host_name = SMTP_HOST;
-  session.server.email = AUTHOR_EMAIL;
+  session.server.port = SMTP_PORT;
   session.login.email = AUTHOR_EMAIL;
   session.login.password = AUTHOR_PASSWORD;
   session.login.user_domain = "";
-
-  SMTP_Message message;
-  SMTP_Message messageRiego;
 
   message.sender.name = "ESP32";
   message.sender.email = AUTHOR_EMAIL;
@@ -191,6 +192,7 @@ void loop() {
     LimiteHoraFin = myFirebaseData.stringData();
     Firebase.set(myFirebaseData, "/OK", false);
     delay(1000);
+    preferences.begin("MiTerrazaIoT", false);
     preferences.putUInt("LimiteRiego", LimiteRiego);
     preferences.putUInt("LimiteHumedad", LimiteHumedad);
     preferences.putBool("RiegoAuto", AUTO);
@@ -218,7 +220,6 @@ void loop() {
     } else {
       Serial.println("Error DHT11");
     }
-    //Higro.set("HumedadSuelo", PorcentajeHumedad);
     Serial.println("Humedad suelo: "); Serial.print(PorcentajeHumedad); Serial.println("% ");
   }
   
@@ -274,7 +275,8 @@ void loop() {
           Firebase.set(myFirebaseData, "/RiegoConectado", true);  
           Firebase.set(myFirebaseData, "/DatosRiego/HumRiego", HumedadRiego);
           Serial.println("Riego Auto Conectado");
-          delay(500);         
+          delay(500); 
+          mensajeRiego();        
         }
         ValvulaRiego = true;
         Serial.println("Salida ValvulaRiego: ");
@@ -324,27 +326,6 @@ void loop() {
     Firebase.set(myFirebaseData, "/RiegoConectado", false);
     delay(500);
 
-    //Conexion Riego Manual
-    /*
-    if(RiegoManualON == true ){
-      if( ValvulaRiego != true){
-        digitalWrite(ValvulaRiegoVin, HIGH);
-        digitalWrite(ValvulaRiegoGND, LOW);
-        timerAlarmEnable(timer2);
-        ValvulaRiego = true;
-        Firebase.set(myFirebaseData, "/RiegoConectado", true);
-        Serial.println("Riego conectado");
-      }
-    }else{
-      if (ValvulaRiego == true){
-        digitalWrite(ValvulaRiegoVin, LOW);
-        digitalWrite(ValvulaRiegoGND, HIGH);
-        timerAlarmEnable(timer2);
-        ValvulaRiego = false;
-      }
-      Firebase.set(myFirebaseData, "/RiegoConectado", false);
-      Serial.println("Riego desconectado");
-    }*/
   }
 }
 
@@ -402,3 +383,28 @@ void mensajeRiego(){
 
   ESP_MAIL_PRINTF("Liberar memoria: %d/n", MailClient.getFreeHeap()); 
 }
+/*
+void smtpCallback(SMTP_Status status){
+  Serial.println(status.info());
+
+  if(status.success()){
+    Serial.println("......................");
+    ESP_MAIL_PRINTF("Message sent success: %d\n", status.completedCount());
+    ESP_MAIL_PRINTF("Message sent failed: %d\n", status.failedCount());
+    Serial.println("......................");
+    struct tm dt;
+    for(size_t i = 0; i < smtp.sendingResult.size(); i++){
+      SMTP_Result result = smtp.sendingResult.getItem(i);
+      time_t ts = (time_t)result.timestamp;
+      localtime_r(&ts, &dt);
+
+      ESP_MAIL_PRINTF("Message No: %d\n", i + 1);
+      ESP_MAIL_PRINTF("Status: %s\n", result.completed ? "success" : "failed");
+      ESP_MAIL_PRINTF("Date/Time: %d/%d/%d %d:%d:%d\n", dt.tm_year + 1900, dt.tm_mon + 1, dt.tm_mday, dt.tm_hour, dt.tm_min, dt.tm_sec);
+      ESP_MAIL_PRINTF("Recipent: %s\n", result.recipients);
+      ESP_MAIL_PRINTF("Subject: %s\n", result.subject);
+    }
+    Serial.println(".....................\n");
+  }
+}
+*/
