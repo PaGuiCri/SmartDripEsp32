@@ -8,11 +8,20 @@
 #include <Arduinojson.h> 
 #include <ESP32Time.h>
 #include <Preferences.h>
+#include <ESP_Mail_Client.h>
 
 /* Red WiFi */
 #define SSID "MiFibra-21E0_EXT"
 #define PASS "MaGGyv9h"
 void InitWiFi();
+
+/* Email */
+#define SMTP_HOST "smtp.gmail.com"
+#define SMTP_PORT 465
+#define AUTHOR_EMAIL "falder24@gmail.com"
+#define AUTHOR_PASSWORD "kcjbfgngmfgkcxtw"
+SMTPSession smtp;
+void smtpCallback(SMTP_Status status);
 
 /* Firebase */
 #define DB_URL "terrazaiot-default-rtdb.europe-west1.firebasedatabase.app"     // URL de la base de datos.
@@ -29,7 +38,6 @@ void IRAM_ATTR onTimer1();
 hw_timer_t *timer1 = NULL;
 void IRAM_ATTR onTimer2();
 hw_timer_t *timer2 = NULL;
-
 
 // Define NTP Client to get time
 ESP32Time rtc;
@@ -77,7 +85,7 @@ bool AUTO, RiegoManualON, RiegoManualOFF, Ok, ValvulaRiego;
 void setup() {
   Serial.begin(9600);
 
-  InitWiFi();                                                   
+  InitWiFi();  
 
   Firebase.begin(DB_URL, SECRET_KEY);                           
   Firebase.reconnectWiFi(true);
@@ -111,15 +119,51 @@ void setup() {
     rtc.setTimeStruct(timeinfo);
   }
 
-  //Guardar datos en memoria flash
+  //Recuperar datos de memoria flash
   preferences.begin("MiTerrazaIoT", false);
-
   preferences.getUInt("LimiteRiego", 10);
   preferences.getUInt("LimiteHumedad", 40);
   preferences.getString("LimiteHoraIni", "17:00");
   preferences.getString("LimiteHoraFin", "23:00");
   preferences.getBool("AUTO", true);
+
   
+  smtp.debug(1);
+  smtp.callback(smtpCallback);
+  ESP_Mail_Session session;
+
+  session.server.host_name = SMTP_HOST;
+  session.server.email = AUTHOR_EMAIL;
+  session.login.email = AUTHOR_EMAIL;
+  session.login.password = AUTHOR_PASSWORD;
+  session.login.user_domain = "";
+
+  SMTP_Message message;
+  SMTP_Message messageRiego;
+
+  message.sender.name = "ESP32";
+  message.sender.email = AUTHOR_EMAIL;
+  message.subject = "Estado ESP32 MiTerrazaIoT";
+  message.addRecipient("Pablo", "falder24@gmail.com");
+
+  messageRiego.sender.name = "ESP32";
+  messageRiego.sender.email = AUTHOR_EMAIL;
+  messageRiego.subject = "Estado Riego MiTerrazaIoT";
+  messageRiego.addRecipient("Pablo", "falder24@gmail.com");
+
+  String textMsg = "ESP32 conectado correctamente a la red y en funcionamiento";
+  message.text.content = textMsg.c_str();
+  message.text.charSet = "us-ascii";
+  message.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
+  message.priority = esp_mail_smtp_priority::esp_mail_smtp_priority_normal;
+
+  if(!smtp.connect(&session))
+    return;
+
+  if(!MailClient.sendMail(&smtp, &message))
+    Serial.println("Error envío Email, " + smtp.errorReason());
+
+  ESP_MAIL_PRINTF("Liberar memoria: %d\n", MailClient.getFreeHeap());
 }
 
 void loop() {
@@ -189,7 +233,6 @@ void loop() {
   }
   
   /* Activar motor de riego */
-
   if (AUTO != false){
 
     Serial.println("Riego AUTO ON");
@@ -231,7 +274,7 @@ void loop() {
           Firebase.set(myFirebaseData, "/RiegoConectado", true);  
           Firebase.set(myFirebaseData, "/DatosRiego/HumRiego", HumedadRiego);
           Serial.println("Riego Auto Conectado");
-          delay(500);
+          delay(500);         
         }
         ValvulaRiego = true;
         Serial.println("Salida ValvulaRiego: ");
@@ -341,4 +384,21 @@ void InitWiFi() {
   Serial.println("");
   Serial.print("Tu IP es: ");
   Serial.println(WiFi.localIP());
+}
+
+void mensajeRiego(){
+ 
+  String textMsg = "Riego conectado correctamente";
+  messageRiego.text.content = textMsg.c_str();
+  messageRiego.text.charSet = "us-ascii";
+  messageRiego.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
+  messageRiego.priority = esp_mail_smtp_priority::esp_mail_smtp_priority_normal;
+
+  if(!smtp.connect(&session))
+    return;
+
+  if(!MailClient.sendMail(&smtp, &messageRiego))
+    Serial.println("Error envío Email, " + smtp.errorReason());
+
+  ESP_MAIL_PRINTF("Liberar memoria: %d/n", MailClient.getFreeHeap()); 
 }
