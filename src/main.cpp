@@ -26,13 +26,15 @@ void mensajeRiego();
 ESP_Mail_Session session;
 SMTP_Message message;
 SMTP_Message messageRiego;
+bool mailIni, mailRiego;
 
 /* Firebase */
 #define DB_URL "terrazaiot-default-rtdb.europe-west1.firebasedatabase.app"     // URL de la base de datos.
 #define SECRET_KEY "fXRMCESlqDEn832HH0pEAcgywE15eEZpoHHaTjU9"                   // Password de la base de datos.
 FirebaseData myFirebaseData;                                                    // Objeto de tipo FirebaseData, ayuda a leer y escribri en la base de datos.
-String myJsonStr;                                     
-FirebaseJson Medidas, DHT11, Higro;
+String myJsonStr;
+String datosEmail;                                     
+FirebaseJson Medidas, DHT11, DatosRiego, limitesRiego, horarioRiego;
 unsigned long TiempoFirebase = 0;
 #define DelayFirebase 100
 
@@ -130,8 +132,18 @@ void setup() {
   LimiteHoraInicio = preferences.getString("LimiteHoraIni", "17:00");
   LimiteHoraFin = preferences.getString("LimiteHoraFin", "23:00");
   AUTO = preferences.getBool("AUTO", true);
+  mailIni = preferences.getBool("mailIni", true);
+  mailRiego = preferences.getBool("mailRiego", true);
   preferences.end();
 
+  //Json Mail
+  limitesRiego.set("LimiteRiego", LimiteRiego);
+  limitesRiego.set("LimiteHumedad", LimiteHumedad);
+  horarioRiego.set("LimiteHoraIni", LimiteHoraInicio);
+  horarioRiego.set("LimiteHoraFin", LimiteHoraFin);
+  DatosRiego.set("limitesRiego", limitesRiego);
+  DatosRiego.set("horarioRiego", horarioRiego);
+  DatosRiego.toString(datosEmail);
   
   //smtp.debug(1);
   //smtp.callback(smtpCallback);
@@ -152,12 +164,13 @@ void setup() {
   messageRiego.subject = "Estado Riego MiTerrazaIoT";
   messageRiego.addRecipient("Pablo", "falder24@gmail.com");
 
-  String textMsg = "ESP32 conectado correctamente a la red y en funcionamiento";
+  String textMsg = "ESP32 conectado correctamente a la red y en funcionamiento \n" + datosEmail;
   message.text.content = textMsg.c_str();
   message.text.charSet = "us-ascii";
   message.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
   message.priority = esp_mail_smtp_priority::esp_mail_smtp_priority_normal;
 
+  if(mailIni){
   if(!smtp.connect(&session))
     return;
 
@@ -165,6 +178,7 @@ void setup() {
     Serial.println("Error envío Email, " + smtp.errorReason());
 
   ESP_MAIL_PRINTF("Liberar memoria: %d\n", MailClient.getFreeHeap());
+  }
 }
 
 void loop() {
@@ -190,6 +204,10 @@ void loop() {
     LimiteHoraInicio = myFirebaseData.stringData();
     Firebase.get(myFirebaseData, "/LimiteHoraFin");
     LimiteHoraFin = myFirebaseData.stringData();
+    Firebase.get(myFirebaseData, "/mailIni");
+    mailIni = myFirebaseData.boolData();
+    Firebase.get(myFirebaseData, "/mailRiego");
+    mailRiego = myFirebaseData.boolData();
     Firebase.set(myFirebaseData, "/OK", false);
     delay(1000);
     preferences.begin("MiTerrazaIoT", false);
@@ -198,6 +216,8 @@ void loop() {
     preferences.putBool("RiegoAuto", AUTO);
     preferences.putString("LimiteHoraIni", LimiteHoraInicio);
     preferences.putString("LimiteHoraFin", LimiteHoraFin);
+    preferences.putBool("mailIni", mailIni);
+    preferences.putBool("mailRiego", mailRiego);
     preferences.end();
   }
 
@@ -276,7 +296,9 @@ void loop() {
           Firebase.set(myFirebaseData, "/DatosRiego/HumRiego", HumedadRiego);
           Serial.println("Riego Auto Conectado");
           delay(500); 
-          mensajeRiego();        
+          if(mailRiego){
+          mensajeRiego();
+          }        
         }
         ValvulaRiego = true;
         Serial.println("Salida ValvulaRiego: ");
@@ -325,7 +347,6 @@ void loop() {
     ValvulaRiego = false;
     Firebase.set(myFirebaseData, "/RiegoConectado", false);
     delay(500);
-
   }
 }
 
