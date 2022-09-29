@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <FirebaseESP32.h>
+#include <Firebase_ESP_Client.h>
 #include <SimpleDHT.h>
 #include <NTPClient.h>
 #include <iostream>
@@ -10,6 +10,9 @@
 #include <Preferences.h>
 #include <ESP_Mail_Client.h>
 
+#include "addons/TokenHelper.h"
+#include "addons/RTDBHelper.h"
+
 /* Red WiFi */
 #define SSID "MiFibra-21E0_EXT"
 #define PASS "MaGGyv9h"
@@ -17,7 +20,7 @@ void InitWiFi();
 
 /* Email */
 #define SMTP_HOST "smtp.gmail.com"
-#define SMTP_PORT 465
+#define SMTP_PORT 465 
 #define AUTHOR_EMAIL "falder24@gmail.com"
 #define AUTHOR_PASSWORD "kcjbfgngmfgkcxtw"
 SMTPSession smtp;
@@ -29,11 +32,16 @@ SMTP_Message messageRiego;
 bool mailIni, mailRiego;
 
 /* Firebase */
-#define DB_URL "terrazaiot-default-rtdb.europe-west1.firebasedatabase.app"     // URL de la base de datos.
-#define SECRET_KEY "fXRMCESlqDEn832HH0pEAcgywE15eEZpoHHaTjU9"                   // Password de la base de datos.
-FirebaseData myFirebaseData;                                                    // Objeto de tipo FirebaseData, ayuda a leer y escribri en la base de datos.
+#define DB_URL "https://terrazaiot-default-rtdb.europe-west1.firebasedatabase.app/" 
+#define API_KEY "AIzaSyAGU4eDmNZntr_sB0dTmnL90M1dytiq37g"                 
+#define USER_EMAIL "falder24@hotmail.com"
+#define USER_PASS "85090405pGc"
+FirebaseData myFirebaseData;                                                   
+FirebaseAuth auth;
+FirebaseConfig config;
 String myJsonStr;
-String datosEmail;                                     
+String datosEmail; 
+String uID;                                    
 FirebaseJson Medidas, DHT11, DatosRiego, limitesRiego, horarioRiego;
 unsigned long TiempoFirebase = 0;
 #define DelayFirebase 100
@@ -79,27 +87,52 @@ int HumedadRiego;
 int LimiteRiego;
 int LimiteHumedad;  
 
-//Instancia para almacenar datos en memoria flash
+//Instancia para almacenar datos de riego en memoria flash
 Preferences preferences;
 
 #define PinLed 2
 #define ValvulaRiegoVin 32
 #define ValvulaRiegoGND 25
+#define SensorFlujo 20
 
-bool AUTO, Ok, ValvulaRiego;
+unsigned long sendDataPrevMillis = 0;
+bool AUTO, Ok, valvulaRiego, reset; 
+bool signupOK = false;
  
 void setup() {
   Serial.begin(9600);
+  
+  InitWiFi();
 
-  InitWiFi();  
+  //Comprobar Hora RTC con NTP
+  configTime(gmtOFFset_sec, daylightOffset_sec, ntpServer);
+  struct tm timeinfo;
+  if(getLocalTime(&timeinfo)){
+    rtc.setTimeStruct(timeinfo);
+  }
 
-  Firebase.begin(DB_URL, SECRET_KEY);                           
+  //Firebase
+  config.api_key = API_KEY;
+  auth.user.email = USER_EMAIL;
+  auth.user.password = USER_PASS;
+  config.database_url = DB_URL;
+  myFirebaseData.setResponseSize(4096);
+  config.token_status_callback = tokenStatusCallback;
+  config.max_token_generation_retry = 5;
+
+  Firebase.begin(&config, &auth);
   Firebase.reconnectWiFi(true);
+  
+  Serial.println("Getting User UID");
+  while ((auth.token.uid) == ""){
+    Serial.print('.');
+    delay(1000);
+  }
+  uID = auth.token.uid.c_str();  
+  Serial.println(uID);
   
   analogReadResolution(9);
 
-  //pinMode(ValvulaRiego, OUTPUT);
-  //digitalWrite(ValvulaRiego, LOW);
   pinMode(PinLed, OUTPUT);
   pinMode(ValvulaRiegoVin, OUTPUT);
   digitalWrite(ValvulaRiegoVin, LOW);
@@ -118,13 +151,6 @@ void setup() {
   timerAlarmEnable(timer2);
   timerAlarmDisable(timer2);
   
-  //Comprobar Hora RTC con NTP
-  configTime(gmtOFFset_sec, daylightOffset_sec, ntpServer);
-  struct tm timeinfo;
-  if (getLocalTime(&timeinfo)){
-    rtc.setTimeStruct(timeinfo);
-  }
-
   //Recuperar datos de memoria flash
   preferences.begin("MiTerrazaIoT", false);
   LimiteRiego = preferences.getUInt("LimiteRiego", 10);
@@ -143,7 +169,7 @@ void setup() {
   horarioRiego.set("LimiteHoraFin", LimiteHoraFin);
   DatosRiego.set("limitesRiego", limitesRiego);
   DatosRiego.set("horarioRiego", horarioRiego);
-  DatosRiego.toString(datosEmail);
+  DatosRiego.toString(datosEmail, true);
   
   //smtp.debug(1);
   //smtp.callback(smtpCallback);
@@ -188,28 +214,32 @@ void loop() {
   Serial.print("Hora: ");
   Serial.println(Hora);
 
- /* Leer Valores APP prefijados */
-  Firebase.get(myFirebaseData,"/OK");
-  Ok = myFirebaseData.boolData();
-  delay(1000);
+  if(Firebase.isTokenExpired()){
+  Firebase.refreshToken(&config);
+  }
   
+  /* Leer Valores APP prefijados */
+  Firebase.RTDB.getBool(&myFirebaseData, "/" + uID + "/OK");
+  Ok = myFirebaseData.boolData();
+  delay(500);
+ 
   if (Ok == true){
-    Firebase.get(myFirebaseData, "/LimiteRiego");
+    Firebase.RTDB.getInt(&myFirebaseData, "/" + uID + "/LimiteRiego");
     LimiteRiego = myFirebaseData.intData();
-    Firebase.get(myFirebaseData, "/LimiteHumedad");
+    Firebase.RTDB.getInt(&myFirebaseData, "/" + uID +  "/LimiteHumedad");
     LimiteHumedad = myFirebaseData.intData();
-    Firebase.get(myFirebaseData, "/RiegoAUTO");
+    Firebase.RTDB.getBool(&myFirebaseData, "/" + uID + "/RiegoAUTO");
     AUTO = myFirebaseData.boolData();
-    Firebase.get(myFirebaseData, "/LimiteHoraInicio");
+    Firebase.RTDB.getString(&myFirebaseData, "/" + uID + "/LimiteHoraInicio");
     LimiteHoraInicio = myFirebaseData.stringData();
-    Firebase.get(myFirebaseData, "/LimiteHoraFin");
+    Firebase.RTDB.getString(&myFirebaseData, "/" + uID + "/LimiteHoraFin");
     LimiteHoraFin = myFirebaseData.stringData();
-    Firebase.get(myFirebaseData, "/mailIni");
+    Firebase.RTDB.getBool(&myFirebaseData, "/" + uID + "/MailIni");
     mailIni = myFirebaseData.boolData();
-    Firebase.get(myFirebaseData, "/mailRiego");
+    Firebase.RTDB.getBool(&myFirebaseData, "/" + uID + "/MailRiego");
     mailRiego = myFirebaseData.boolData();
-    Firebase.set(myFirebaseData, "/OK", false);
-    delay(1000);
+    Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/OK", false);
+    delay(500);
     preferences.begin("MiTerrazaIoT", false);
     preferences.putUInt("LimiteRiego", LimiteRiego);
     preferences.putUInt("LimiteHumedad", LimiteHumedad);
@@ -228,28 +258,37 @@ void loop() {
   HoraInicioCheck = Hora.compareTo(LimiteHoraInicio);
   HoraFinCheck = Hora.compareTo(LimiteHoraFin);
 
+  /* Reset */
+  Firebase.RTDB.getBool(&myFirebaseData,"/" + uID + "/Reset");
+  reset = myFirebaseData.boolData();
+
+  if (reset == true){
+    Firebase.RTDB.setBool(&myFirebaseData,"/" + uID + "/Reset", false);
+    esp_restart;
+  }  
+
   /* Lectura del Higro y DHT11 cada 1.2s */
   int HumedadSuelo = analogRead(PinHigro);
   PorcentajeHumedad = map(HumedadSuelo, wet, dry, 100, 0);
   if (millis() > TiempoDHT + SampleDHT){
     if (DHT.read2(&Temperatura, &Humedad, NULL) == SimpleDHTErrSuccess) {
       Serial.println("DHT11 OK");
-      DHT11.set("Temperatura", Temperatura);
-      DHT11.set("Humedad", Humedad);
+      DHT11.set("/Temperatura", Temperatura);
+      DHT11.set("/Humedad", Humedad);
       TiempoDHT = millis();
     } else {
       Serial.println("Error DHT11");
     }
-    Serial.println("Humedad suelo: "); Serial.print(PorcentajeHumedad); Serial.println("% ");
+    Serial.println("Humedad suelo: "); Serial.print(PorcentajeHumedad); Serial.println("%");
   }
   
-  Medidas.set("DHT11", DHT11);
-  Medidas.set("Higro/HumedadSuelo", PorcentajeHumedad);
+  Medidas.set("/DHT11", DHT11);
+  Medidas.set("/Higro/HumedadSuelo", PorcentajeHumedad);
   Medidas.toString(myJsonStr);
-
+  delay(1000);
   /* Subir a la base de datos cada segundo los valores del Higro y DHT11 */
   if(millis() > TiempoFirebase + DelayFirebase){
-    Firebase.set(myFirebaseData, "Medidas", Medidas);
+    Serial.printf("Set json... %s\n", Firebase.RTDB.setJSON(&myFirebaseData, "/" + uID + "/Medidas", &Medidas) ? "ok" : myFirebaseData.errorReason().c_str());
     TiempoFirebase = millis();
   }
   
@@ -275,39 +314,39 @@ void loop() {
     if(HoraInicioCheck >= 0 && HoraFinCheck <=0){
       Serial.println("Horario de riego activo");
       if(PorcentajeHumedad > HumedadRiego){
-        if(CheckTimer != true){
+        if(!CheckTimer){
         Serial.println("Suelo húmedo, no necesita regarse");
-        }
-        if(CheckTimer != false){
-          Firebase.set(myFirebaseData, "/DatosRiego/TiempoRiego", TiempoRIEGO);
+        }else {
+          Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/DatosRiego/TiempoRiego", TiempoRIEGO);
         }
       }
       else {
         timerAlarmEnable(timer1);
-        if( ValvulaRiego != true){
+        if(!valvulaRiego){
           digitalWrite(ValvulaRiegoVin, HIGH);
           digitalWrite(ValvulaRiegoGND, LOW);
-          //Serial.println("Salida ValvulaVin: ");
-          //Serial.println(ValvulaRiegoVin);
-          //Serial.println("Salida ValvulaGND: ");
-          //Serial.println(ValvulaRiegoGND);
           timerAlarmEnable(timer2);
-          Firebase.set(myFirebaseData, "/RiegoConectado", true);  
-          Firebase.set(myFirebaseData, "/DatosRiego/HumRiego", HumedadRiego);
-          Serial.println("Riego Auto Conectado");
           delay(500); 
+          
+          if(!SensorFlujo){     //prueba configuracion sensor de  flujo
+            digitalWrite(ValvulaRiegoVin, LOW);
+            digitalWrite(ValvulaRiegoGND, HIGH);
+            timerAlarmEnable(timer2);
+            timerAlarmDisable(timer1);
+          }
+          Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/RiegoConectado", true);  
+          Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/DatosRiego/HumRiego", HumedadRiego);
+          Serial.println("Riego Auto Conectado");
           if(mailRiego){
           mensajeRiego();
           }        
         }
-        ValvulaRiego = true;
+        valvulaRiego = true;
         Serial.println("Salida ValvulaRiego: ");
-        Serial.println(ValvulaRiego);
+        Serial.println(valvulaRiego);
         digitalWrite(PinLed, toggle);
         Serial.println("Suelo seco, necesita regarse");
-        Firebase.set(myFirebaseData, "/DatosRiego/TiempoRiego", TiempoRIEGO);
-        //Firebase.set(myFirebaseData,"/HorarioRiego/HoraFinRiego", LimiteHoraFin);
-        //Firebase.set(myFirebaseData,"/HorarioRiego/HoraInicioRiego", LimiteHoraInicio);
+        Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/DatosRiego/TiempoRiego", TiempoRIEGO);
         Serial.println(contador);
         Serial.println(TiempoRIEGO);
         delay(1000);
@@ -316,7 +355,7 @@ void loop() {
     if(TiempoRIEGO <= 0 && AUTO != false){
       Serial.println("Tiempo de Riego terminado");
       timerAlarmDisable(timer1);
-      if (ValvulaRiego == true){
+      if (valvulaRiego == true){
         digitalWrite(ValvulaRiegoVin, LOW);
         digitalWrite(ValvulaRiegoGND, HIGH);
         Serial.println("Salida ValvulaVin: ");
@@ -324,9 +363,9 @@ void loop() {
         Serial.println("Salida ValvulaGND: ");
         Serial.println(ValvulaRiegoGND);
         timerAlarmEnable(timer2);
-        ValvulaRiego = false;
+        valvulaRiego = false;
       }
-      Firebase.set(myFirebaseData, "/RiegoConectado", false);
+      Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/RiegoConectado", false);
     }
   }
   else{
@@ -335,7 +374,7 @@ void loop() {
     contador = 0;
     LimiteRiego = 0;
 
-    if (ValvulaRiego == true){
+    if (valvulaRiego == true){
         digitalWrite(ValvulaRiegoVin, LOW);
         digitalWrite(ValvulaRiegoGND, HIGH);
         Serial.println("Salida ValvulaVin: ");
@@ -344,8 +383,8 @@ void loop() {
         Serial.println(ValvulaRiegoGND);
         timerAlarmEnable(timer2);
     }
-    ValvulaRiego = false;
-    Firebase.set(myFirebaseData, "/RiegoConectado", false);
+    valvulaRiego = false;
+    Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/RiegoConectado", false);
     delay(500);
   }
 }
@@ -371,25 +410,21 @@ void InitWiFi() {
   WiFi.begin(SSID, PASS);                 // Inicializamos el WiFi con nuestras credenciales.
   Serial.print("Conectando a ");
   Serial.print(SSID);
-
   while(WiFi.status() != WL_CONNECTED){  
     Serial.print(".");
     delay(50);
   }
-
   if(WiFi.status() == WL_CONNECTED){      // Si el estado del WiFi es conectado entra al If
     Serial.println("");
     Serial.println("");
     Serial.println("Conexion exitosa!!!");
   }
-
   Serial.println("");
   Serial.print("Tu IP es: ");
   Serial.println(WiFi.localIP());
 }
 
 void mensajeRiego(){
- 
   String textMsg = "Riego conectado correctamente";
   messageRiego.text.content = textMsg.c_str();
   messageRiego.text.charSet = "us-ascii";
