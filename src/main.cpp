@@ -26,6 +26,10 @@ void InitWiFi();
 SMTPSession smtp;
 void smtpCallback(SMTP_Status status);
 void mailSmartDripOn();
+void mailStartSystem();
+void mailErrorValve();
+void mailErrorDHT11();
+void mailErrorSensorHigro();
 ESP_Mail_Session session;
 SMTP_Message mailStartSDS;
 SMTP_Message mailDripOn;
@@ -35,7 +39,7 @@ SMTP_Message mailErrorDHT;
 SMTP_Message mailErrorHigro;
 bool mailIni, mailRiego, mailErrV, mailErrFS, mailErrDht, mailErrHig;
 
-/* Firebase */
+/* Configuración Firebase */
 #define DB_URL "https://terrazaiot-default-rtdb.europe-west1.firebasedatabase.app/" 
 #define API_KEY "AIzaSyAGU4eDmNZntr_sB0dTmnL90M1dytiq37g"                 
 #define USER_EMAIL "falder24@hotmail.com"
@@ -48,7 +52,7 @@ String datosEmail;
 String uID;                                    
 FirebaseJson Medidas, DHT11, DatosRiego, limitesRiego, horarioRiego;
 unsigned long TiempoFirebase = 0;
-#define DelayFirebase 100
+#define DelayFirebase 1000  // cambio a 1000 para regular la subida a la base de datos antes 100
 
 /* Timers */
 volatile bool toggle = true;
@@ -71,12 +75,12 @@ String LimiteHoraInicio;
 String LimiteHoraFin;
 int HoraInicioCheck, HoraFinCheck;
 
-/* Sincronizacion del RTC con NTP */
+/* Sincronización del RTC con NTP */
 const char* ntpServer = "pool.ntp.org";
 const long gmtOFFset_sec = 3600;
 const int daylightOffset_sec = 3600;
 
-/* Configuracion de terminales para Higrometro y DHT11  */
+/* Configuración de terminales para higrómetro y DHT11  */
 #define PinHigro 13  // Nueva configuración de pines antes 34
 #define PinDHT 35     // Nueva configuración de pines antes 4
 float Temperatura = 0, Humedad = 0;
@@ -91,6 +95,23 @@ int TiempoRIEGO;
 int HumedadRiego;
 int LimiteRiego;
 int LimiteHumedad;  
+
+/* Pin de entrada para el sensor de caudal */
+// const int sensorPin = 34; // Cambia el número del pin según cómo lo hayas conectado
+
+/* Variables para el cálculo del caudal */
+volatile int pulsos = 0;
+float tasaDeFlujo = 0.0;
+unsigned int litrosRiego = 0;
+unsigned long totalLitros = 0;
+unsigned long oldTime = 0;
+
+/* Interrupción llamada cada vez que se detecta un pulso del sensor */
+void pulseCounter(){
+  /* Incrementa el contador de pulsos */
+  pulsos++;
+}
+void contadorLitros();
 
 /* Instancia para almacenar datos de riego en memoria flash */
 Preferences preferences;
@@ -146,8 +167,12 @@ void setup() {
   digitalWrite(valvulaRiegoVin1, LOW);
   pinMode(valvulaRiegoGND1, OUTPUT);
   digitalWrite(valvulaRiegoGND1, LOW);
-  
-  //Temporizadores
+  pinMode(sensorFlujo, INPUT);
+
+  /* Configuración de la interrupción para detectar los pulsos del sensor de flujo */
+  attachInterrupt(digitalPinToInterrupt(sensorFlujo), pulseCounter, FALLING);
+
+  /* Congifuracióon temporizadores */
   timer1 = timerBegin(0, 80, true);
   timerAttachInterrupt(timer1, &onTimer1, true);
   timerAlarmWrite(timer1, 1000000, true);
@@ -163,8 +188,9 @@ void setup() {
   preferences.begin("MiTerrazaIoT", false);
   LimiteRiego = preferences.getUInt("LimiteRiego", 10);
   LimiteHumedad = preferences.getUInt("LimiteHumedad", 40);
-  LimiteHoraInicio = preferences.getString("LimiteHoraIni", "17:00");
-  LimiteHoraFin = preferences.getString("LimiteHoraFin", "23:00");
+  LimiteHoraInicio = preferences.getString("LimiteHoraIni", "21:00");
+  LimiteHoraFin = preferences.getString("LimiteHoraFin", "23:30");
+  totalLitros = preferencces.getString("totalLitros", "0 L.");     // Añadida linea de recuperación de consumo total de agua
   AUTO = preferences.getBool("AUTO", true);
   mailIni = preferences.getBool("mailIni", true);
   mailRiego = preferences.getBool("mailRiego", true);
@@ -248,6 +274,8 @@ void loop() {
     mailIni = myFirebaseData.boolData();
     Firebase.RTDB.getBool(&myFirebaseData, "/" + uID + "/MailRiego");
     mailRiego = myFirebaseData.boolData();
+    Firebase.RTDB.getInt(&myFirebaseData, "/" + uID + "/totalLitros"); // Añadida lineas para recuperar dato de consumo de la base de datos
+    totalLitros = myFirebaseData.intData();
     Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/OK", false);
     delay(500);
     preferences.begin("MiTerrazaIoT", false);
@@ -258,6 +286,7 @@ void loop() {
     preferences.putString("LimiteHoraFin", LimiteHoraFin);
     preferences.putBool("mailIni", mailIni);
     preferences.putBool("mailRiego", mailRiego);
+    preferences.putUInt("totalLitros", totalLitros);
     preferences.end();
   }
 
@@ -338,24 +367,26 @@ void loop() {
         if(!valvulaRiego){
           openDripValve();
           delay(1000); 
-          
+          contadorLitros();
           if(valvulaRiego & !sensorFlujo){     //prueba configuracion sensor de  flujo
             closeDripValve();
             timerAlarmDisable(timer1);
           }else{
+            /* Subir a la base de datos actualizados de humedad de sustrato y riego conectado */
             Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/RiegoConectado", true);  
             Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/DatosRiego/HumRiego", HumedadRiego);
+            Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/DatosRiego/CantidadAgua", litrosRiego);
             Serial.println("Riego Auto Conectado");
             if(mailRiego){
               mailSmartDripOn();
             }        
           }
-        }                   //pendiente continuar comprobacion inclusion sensor desde aqui
+        }                 
         valvulaRiego = true;
         Serial.println("Salida ValvulaRiego: ");
         Serial.println(valvulaRiego);
-        digitalWrite(PinLed, toggle);
         Serial.println("Suelo seco, necesita regarse");
+        /* Subir tiempo de riego restante */
         Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/DatosRiego/TiempoRiego", TiempoRIEGO);
         Serial.println(contador);
         Serial.println(TiempoRIEGO);
@@ -367,10 +398,6 @@ void loop() {
       timerAlarmDisable(timer1);
       if (valvulaRiego == true){
         closeDripValve();
-        /* Serial.println("Salida ValvulaVin: ");
-        Serial.println(ValvulaRiegoVin);
-        Serial.println("Salida ValvulaGND: ");
-        Serial.println(ValvulaRiegoGND); */
         valvulaRiego = false;
       }
       Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/RiegoConectado", false);
@@ -426,6 +453,43 @@ void closeDripValve(){
   timerAlarmEnable(timer2);
 }
 
+void contadorLitros(){
+  if(sensorFlujo){
+    /* Cálculo del caudal cada segundo */
+    if ((millis() - oldTime) > 1000){
+      /* Desactiva las interrupciones mientras se realiza el cálculo */
+      detachInterrupt(digitalPinToInterrupt(sensorFlujo));
+      Serial.print("Pulsos: ");
+      Serial.println(pulsos);
+
+      /* Calcula el caudal en litros por minuto */
+      tasaDeFlujo = pulsos / 5.5;                         // factor de conversión, siendo K=7.5 para el sensor de ½”, K=5.5 para el sensor de ¾” y 3.5 para el sensor de 1”
+
+      // Reinicia el contador de pulsos
+      pulsos = 0;
+
+      // Calcula el volumen de agua en mililitros
+      litrosRiego = (tasaDeFlujo / 60) * 1000 /1000;
+
+      // Incrementa el volumen total acumulado
+      totalLitros += litrosRiego;
+
+      // Muestra los resultados por consola
+      Serial.print("Caudal: ");
+      Serial.print(tasaDeFlujo);
+      Serial.print(" L/min - Volumen acumulado: ");
+      Serial.print(totalLitros);
+      Serial.println(" L.");
+
+      // Activa las interrupciones nuevamente
+      attachInterrupt(digitalPinToInterrupt(sensorFlujo), pulseCounter, FALLING);
+
+      // Actualiza el tiempo anterior
+      oldTime = millis();
+    }
+  }
+}
+
 void InitWiFi() {
   WiFi.begin(SSID, PASS);                 // Inicializamos el WiFi con nuestras credenciales.
 
@@ -448,7 +512,13 @@ void InitWiFi() {
 }
 
 void mailStartSystem(){
-  String textMsg = "ESP32 conectado correctamente a la red y en funcionamiento \n" + datosEmail;
+  String textMsg = " ESP32 conectado correctamente a la red y en funcionamiento. \n" +   // cambio en el email de inicio de SmartDrip para mejorar la visualización sin las llaves de json
+                   " Datos de configuración guardados: \n" + 
+                   " Tiempo de riego: " + LimiteRiego + "min. \n" + 
+                   " Limite de humedad de riego: " + LimiteHumedad + "% \n" +
+                   " Horario de activación de riego: \n" +
+                   " Hora de inicio: " + LimiteHoraInicio + " \n" +
+                   " Hora de fin: " + LimiteHoraFin + " \n";
   mailStartSDS.text.content = textMsg.c_str();
   mailStartSDS.text.charSet = "us-ascii";
   mailStartSDS.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
