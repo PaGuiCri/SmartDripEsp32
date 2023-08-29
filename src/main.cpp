@@ -14,7 +14,7 @@
 #include "addons/RTDBHelper.h"
 
 /* Red WiFi */
-#define SSID "DIGIFIBRA-HNch"
+#define SSID "MiFibra-21E0_EXT"
 #define PASS "2SSxDxcYNh"
 void InitWiFi();
 
@@ -33,11 +33,13 @@ void mailErrorSensorHigro();
 ESP_Mail_Session session;
 SMTP_Message mailStartSDS;
 SMTP_Message mailDripOn;
-//SMTP_Message mailErrorValve;
+SMTP_Message mailErrValve;
 SMTP_Message mailErrorFlowSensor;
 SMTP_Message mailErrorDHT;
 SMTP_Message mailErrorHigro;
-bool mailIni, mailRiego, mailErrV, mailErrFS, mailErrDht, mailErrHig;
+bool mailIni, mailRiego, mailErrV, mailErrFS, mailErrDht, mailErrHig; 
+bool mailRiegoEnviado = false; 
+bool mailErrorValveEnviado = false;
 
 /* Configuración Firebase */
 #define DB_URL "https://terrazaiot-default-rtdb.europe-west1.firebasedatabase.app/" 
@@ -62,9 +64,12 @@ hw_timer_t *timer1 = NULL;
 void IRAM_ATTR onTimer2();
 hw_timer_t *timer2 = NULL;
 
-/* Métodos para abrir y cerrar la electrválvula */
+/* Métodos para abrir y cerrar la electroválvula */
 void openDripValve();
 void closeDripValve();
+void cortarPulso();
+void closeValveError();
+
 /* Define NTP Client to get time */
 ESP32Time rtc;
 WiFiUDP ntpUDP;
@@ -105,7 +110,7 @@ int LimiteHumedad;
 
 /* Variables para el cálculo del caudal */
 volatile int pulsos = 0;
-float tasaDeFlujo = 0.0;
+float caudal = 0.0;
 float litrosRiego = 0;
 float totalLitros = 0;
 unsigned long oldTime = 0;
@@ -113,7 +118,6 @@ bool estadoSensorFlujo = false;
 
 /* Interrupción llamada cada vez que se detecta un pulso del sensor */
 void pulseCounter(){
-  /* Incrementa el contador de pulsos */
   pulsos++;
 }
 void contadorLitros();
@@ -127,10 +131,11 @@ Preferences preferences;
 #define valvulaRiegoGND2 33
 #define sensorFlujo 13     // Nueva configuración de pines antes 20 pendiente test pin 13
 
-unsigned long sendDataPrevMillis = 0;
-bool AUTO, Ok, valvulaRiego, reset; 
-bool signupOK = false;
- 
+bool AUTO, Ok, valvulaRiego, reset, pulsoActivo; 
+const unsigned long duracionPulso = 100; // Duración del pulso en milisegundos
+unsigned long tiempoPulsoInicio = 0;
+int contadorCierreValve = 10;
+
 void setup() {
   Serial.begin(9600);
 
@@ -175,17 +180,12 @@ void setup() {
   /* Configuración de la interrupción para detectar los pulsos del sensor de flujo */
   attachInterrupt(digitalPinToInterrupt(sensorFlujo), pulseCounter, FALLING);
 
-  /* Congifuracióon temporizadores */
+  /* Configuración temporizador */
   timer1 = timerBegin(0, 80, true);
   timerAttachInterrupt(timer1, &onTimer1, true);
   timerAlarmWrite(timer1, 1000000, true);
   timerAlarmEnable(timer1);
   timerAlarmDisable(timer1);
-  timer2 = timerBegin(3, 80, true);
-  timerAttachInterrupt(timer2, &onTimer2, true);
-  timerAlarmWrite(timer2, 500000, true);
-  timerAlarmEnable(timer2);
-  timerAlarmDisable(timer2);
   
   /* Recuperar datos de memoria flash */
   preferences.begin("MiTerrazaIoT", false);
@@ -227,10 +227,10 @@ void setup() {
   mailDripOn.subject = "Estado Riego MiTerrazaIoT";
   mailDripOn.addRecipient("Pablo", "falder24@gmail.com");
   /* Mail de error en electrválvula de riego */
-  //mailErrorValve.sender.name = "Smart Drip System";
-  //mailErrorValve.sender.email = AUTHOR_EMAIL;
-  //mailErrorValve.subject = "Estado válvula de Smart Drip";
-  //mailErrorValve.addRecipient("Pablo", "falder24@gmail.com");
+  mailErrValve.sender.name = "Smart Drip System";
+  mailErrValve.sender.email = AUTHOR_EMAIL;
+  mailErrValve.subject = "Estado válvula de Smart Drip";
+  mailErrValve.addRecipient("Pablo", "falder24@gmail.com");
   /* Mail de error en sensor de flujo */
   mailErrorFlowSensor.sender.name = "Smart Drip System";
   mailErrorFlowSensor.sender.email = AUTHOR_EMAIL;
@@ -242,12 +242,13 @@ void setup() {
   mailErrorDHT.subject = "Estado sensor medio ambiente";
   mailErrorDHT.addRecipient("Pablo", "falder24@gmail.com");
   /* Envío mail inicio sistema Smart Drip correctamente*/
-  if(mailIni)
-    mailStartSystem();  
+  if(mailIni){
+    mailStartSystem();
+  }    
+  cortarPulso();
 }
-
+        
 void loop() {
-
   /*Leer Hora */
   Hora = rtc.getTime();
   Serial.print("Hora: ");
@@ -256,12 +257,13 @@ void loop() {
   if(Firebase.isTokenExpired()){
   Firebase.refreshToken(&config);
   }
-  
   /* Leer Valores APP prefijados */
   Firebase.RTDB.getBool(&myFirebaseData, "/" + uID + "/OK");
   Ok = myFirebaseData.boolData();
-  delay(500);
-  
+  contadorLitros();
+  if (pulsoActivo && (millis() - tiempoPulsoInicio >= duracionPulso)) {
+    cortarPulso();
+  } 
   if (Ok == true){
     Firebase.RTDB.getInt(&myFirebaseData, "/" + uID + "/LimiteRiego");
     LimiteRiego = myFirebaseData.intData();
@@ -280,7 +282,6 @@ void loop() {
     Firebase.RTDB.getInt(&myFirebaseData, "/" + uID + "/totalLitros"); // Añadida lineas para recuperar dato de consumo de la base de datos
     totalLitros = myFirebaseData.intData();
     Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/OK", false);
-    delay(500);
     preferences.begin("MiTerrazaIoT", false);
     preferences.putUInt("LimiteRiego", LimiteRiego);
     preferences.putUInt("LimiteHumedad", LimiteHumedad);
@@ -303,7 +304,6 @@ void loop() {
   /* Reset */
   Firebase.RTDB.getBool(&myFirebaseData,"/" + uID + "/Reset");
   reset = myFirebaseData.boolData();
-
   if (reset == true){
     Firebase.RTDB.setBool(&myFirebaseData,"/" + uID + "/Reset", false);
     esp_restart;
@@ -319,16 +319,14 @@ void loop() {
       DHT11.set("/Humedad", Humedad);
       TiempoDHT = millis();
     } else {
-      //mailErrorDHT11();  se comenta la linea para realizar las pruebas y evitar envio masivo de emails
+      mailErrorDHT11();
       Serial.println("Error DHT11");
     }
-    Serial.println("Humedad suelo: "); Serial.print(PorcentajeHumedad); Serial.println("%");
+    Serial.print("Humedad suelo: "); Serial.print(PorcentajeHumedad); Serial.println("%");
   }
-  
   Medidas.set("/DHT11", DHT11);
   Medidas.set("/Higro/HumedadSuelo", PorcentajeHumedad);
   Medidas.toString(myJsonStr);
-  delay(1000);
   
   /* Subir a la base de datos cada segundo los valores del Higro y DHT11 */
   if(millis() > TiempoFirebase + DelayFirebase){  //pendiente comprobación tiempo de subida de datos
@@ -338,17 +336,17 @@ void loop() {
   
   /* Activar motor de riego */
   if (AUTO != false){
-
     Serial.println("Riego AUTO ON");
     bool CheckTimer = timerAlarmEnabled(timer1);
-    delay(500);
-
     Serial.print("Checktimer: ");
     Serial.println(CheckTimer);
     if (CheckTimer != true){
       TiempoRIEGO = LimiteRiego;
       HumedadRiego = LimiteHumedad;
       Serial.println("Temporizador desconectado");
+    }else{
+      Serial.println("Temporizador conectado");
+      Serial.println("Proceso de riego en marcha");
     }
     Serial.print("TiempoRIEGO: ");
     Serial.println(TiempoRIEGO);
@@ -366,56 +364,64 @@ void loop() {
         }
       }
       else {
+        Serial.println("Suelo seco, necesita regarse");
         timerAlarmEnable(timer1);
         if(!valvulaRiego){
           openDripValve();
-          delay(1000); 
-        }else{
-
           contadorLitros();
-          if(caudalRiego != 0){
-            estadoSensorFlujo = true;
-            Serial.println(" Sensor de riego conectado");
-          }else{
-            estadoSensorFlujo = false;
-            Serial.println(" Sensor de riego desconectado");
-          }
+          Serial.println("Proceso de riego iniciado");  
+        }else{
+          contadorLitros();
           if(valvulaRiego && estadoSensorFlujo){
-            
-            Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/CaudalRiego", caudalRiego); 
-            Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/CaudalTotal", totalLitros); 
-            // Muestra los resultados por consola
             Serial.print("Caudal: ");
-            Serial.print(tasaDeFlujo);
+            Serial.print(caudal);
             Serial.print(" L/min - Volumen acumulado: ");
             Serial.print(totalLitros);
             Serial.println(" L.");
-            Serial.print("Cantidad agua: ");
-            Serial.print(caudalRiego);
-            Serial.println(" L.");
-          }
-            /* Subir a la base de datos actualizados de humedad de sustrato y riego conectado */
-            Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/RiegoConectado", true);  
-            Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/DatosRiego/HumRiego", HumedadRiego);
-            Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/DatosRiego/CantidadAgua", litrosRiego);
-            Serial.println("Riego Auto Conectado");
-            if(mailRiego){
+            if(mailRiego && !mailRiegoEnviado){
               mailSmartDripOn();
-            }        
+              mailRiegoEnviado = true;
+            }
           }
-        }                 
+          /* Subir a la base de datos actualizados de humedad de sustrato y riego conectado */
+          Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/RiegoConectado", true);  
+          Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/DatosRiego/HumRiego", HumedadRiego);
+          Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/DatosRiego/CantidadAgua", litrosRiego);
+          Serial.println("Riego Auto Conectado");        
+        }   
         valvulaRiego = true;
-        Serial.println("Salida ValvulaRiego: ");
+        Serial.print("Salida ValvulaRiego: ");
         Serial.println(valvulaRiego);
-        Serial.println("Suelo seco, necesita regarse");
+        Serial.print("Estado sensor flujo: ");
+        Serial.println(estadoSensorFlujo);
         /* Subir tiempo de riego restante */
         Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/DatosRiego/TiempoRiego", TiempoRIEGO);
+        Serial.print("Contador conectado: ");
         Serial.println(contador);
-        Serial.println(TiempoRIEGO);
-        delay(1000);
-        if(valvulaRiego & !sensorFlujo){     //prueba configuracion sensor de  flujo
-            closeDripValve();
-            timerAlarmDisable(timer1);
+        Serial.print("Tiempo de riego: ");
+        Serial.println(TiempoRIEGO + " min.");
+        if(valvulaRiego & !estadoSensorFlujo){     
+          Serial.println("Error en apertura de valvula. Se reinicia el proceso de riego");
+          closeDripValve();
+          timerAlarmDisable(timer1);
+          mailRiegoEnviado = false;
+        }
+      }
+    }else{
+      Serial.println(" Fuera de horario de riego");
+      Serial.print(" Caudal de riego fuera de horario: ");
+      Serial.println(caudalRiego);
+      if(!valvulaRiego && caudalRiego != 0){
+        if(contadorCierreValve != 0){
+          closeValveError();
+        }
+        if(estadoSensorFlujo && !mailErrorValveEnviado && contadorCierreValve == 0){
+          mailErrorValve();
+          mailErrorValveEnviado = true;
+          Serial.println("Email de Error en válvula enviado");
+          AUTO = false;
+          Firebase.RTDB.setBool(&myFirebaseData,"/" + uID + "/RiegoAUTO", false);
+        }
       }
     }
     if(TiempoRIEGO <= 0 && AUTO != false){
@@ -424,6 +430,7 @@ void loop() {
       if (valvulaRiego == true){
         closeDripValve();
         valvulaRiego = false;
+        mailRiegoEnviado = false;
       }
       Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/RiegoConectado", false);
     }
@@ -433,19 +440,11 @@ void loop() {
     timerAlarmDisable(timer1);
     contador = 0;
     LimiteRiego = 0;
-
     if (valvulaRiego == true){
-        digitalWrite(valvulaRiegoVin1, LOW);
-        digitalWrite(valvulaRiegoGND1, HIGH);
-        Serial.println("Salida ValvulaVin: ");
-        Serial.println(valvulaRiegoVin1);
-        Serial.println("Salida ValvulaGND: ");
-        Serial.println(valvulaRiegoGND1);
-        timerAlarmEnable(timer2);
+        closeDripValve();
     }
     valvulaRiego = false;
     Firebase.RTDB.setBool(&myFirebaseData, "/" + uID + "/RiegoConectado", false);
-    delay(500);
   }
 }
 /* Método temporizador 1min */
@@ -459,61 +458,112 @@ void IRAM_ATTR onTimer1() {
       }
     }
 }
-/* Método temporizador para cortar tensión al puente H */
-void IRAM_ATTR onTimer2() {
-  digitalWrite(valvulaRiegoVin1, LOW);
-  digitalWrite(valvulaRiegoGND1, LOW);
-  timerAlarmDisable(timer2);
-}
 
 void openDripValve(){
+  Serial.println("Apertura de válvula de riego");
   digitalWrite(valvulaRiegoVin1, HIGH);
   digitalWrite(valvulaRiegoGND1, LOW);
-  timerAlarmEnable(timer2);
+  int estadoSalida = digitalRead(valvulaRiegoVin1);
+  Serial.print("VálvulaRiegoVin: ");
+  Serial.println(estadoSalida);
+  estadoSalida = digitalRead(valvulaRiegoGND1);
+  Serial.print("VálvulaRiegoGND: ");
+  Serial.println(estadoSalida);
+  tiempoPulsoInicio = millis();
+  pulsoActivo = true;
+  Serial.println("Pulso Activo");
+  //timerAlarmEnable(timer2);
 }
 
 void closeDripValve(){
+  Serial.println("Cierre de válvula de riego");
   digitalWrite(valvulaRiegoVin1, LOW);
   digitalWrite(valvulaRiegoGND1, HIGH);
-  timerAlarmEnable(timer2);
+  int estadoSalida = digitalRead(valvulaRiegoVin1);
+  Serial.print("VálvulaRiegoVin: ");
+  Serial.println(estadoSalida);
+  estadoSalida = digitalRead(valvulaRiegoGND1);
+  Serial.print("VálvulaRiegoGND: ");
+  Serial.println(estadoSalida);
+  valvulaRiego = false;
+  tiempoPulsoInicio = millis();
+  pulsoActivo = true;
+  Serial.println("Pulso Activo");
+  //timerAlarmEnable(timer2);
+}
+
+void closeValveError(){
+  Serial.println("Cierre de válvula de riego de emergencia");
+  digitalWrite(valvulaRiegoVin1, LOW);
+  digitalWrite(valvulaRiegoGND1, HIGH);
+  int estadoSalida = digitalRead(valvulaRiegoVin1);
+  Serial.print("VálvulaRiegoVin: ");
+  Serial.println(estadoSalida);
+  estadoSalida = digitalRead(valvulaRiegoGND1);
+  Serial.print("VálvulaRiegoGND: ");
+  Serial.println(estadoSalida);
+  valvulaRiego = false;
+  tiempoPulsoInicio = millis();
+  pulsoActivo = true;
+  Serial.println("Pulso Activo");
+  delay(150);
+  if (pulsoActivo && (millis() - tiempoPulsoInicio >= duracionPulso)) {  
+    cortarPulso();
+  } 
+  contadorCierreValve--;
+  Serial.print("Intentos: ");
+  Serial.println(contadorCierreValve);
+  delay(1000);
+}
+
+void cortarPulso(){
+  digitalWrite(valvulaRiegoVin1, LOW);
+  digitalWrite(valvulaRiegoGND1, LOW);
+  Serial.println("Corta corriente salidas electrovalvula");
+  int estadoSalida = digitalRead(valvulaRiegoVin1);
+  Serial.print("VálvulaRiegoVin: ");
+  Serial.println(estadoSalida);
+  estadoSalida = digitalRead(valvulaRiegoGND1);
+  Serial.print("VálvulaRiegoGND: ");
+  Serial.println(estadoSalida);
+  pulsoActivo = false;
+  Serial.println("Pulso no activo");
 }
 
 void contadorLitros(){
-  if(sensorFlujo){
     /* Cálculo del caudal cada segundo */
     if ((millis() - oldTime) > 1000){
       /* Desactiva las interrupciones mientras se realiza el cálculo */
       detachInterrupt(digitalPinToInterrupt(sensorFlujo));
       Serial.print("Pulsos: ");
       Serial.println(pulsos);
-
       /* Calcula el caudal en litros por minuto */
-      tasaDeFlujo = pulsos / 5.5;                         // factor de conversión, siendo K=7.5 para el sensor de ½”, K=5.5 para el sensor de ¾” y 3.5 para el sensor de 1”
-
+      caudal = pulsos / 5.5;                         // factor de conversión, siendo K=7.5 para el sensor de ½”, K=5.5 para el sensor de ¾” y 3.5 para el sensor de 1”
       // Reinicia el contador de pulsos
       pulsos = 0;
-
       // Calcula el volumen de agua en mililitros
-      litrosRiego = (tasaDeFlujo / 60) * 1000 /1000;
-
+      litrosRiego = (caudal / 60) * 1000/1000;
       // Incrementa el volumen total acumulado
       totalLitros += litrosRiego;
-
       // Activa las interrupciones nuevamente
       attachInterrupt(digitalPinToInterrupt(sensorFlujo), pulseCounter, FALLING);
-
       // Actualiza el tiempo anterior
       oldTime = millis();
-
-      caudalRiego = litrosRiego;
-      caudalTotal = totalLitros;      
+      caudalRiego = caudal;
+      caudalTotal = totalLitros; 
+      if(caudal != 0){
+            estadoSensorFlujo = true;
+            Serial.println(" Sensor de riego conectado");
+          }else{
+            estadoSensorFlujo = false;
+            Serial.println(" Sensor de riego desconectado");
+          } 
+      Firebase.RTDB.setInt(&myFirebaseData, "/" + uID + "/CaudalRiego", caudalRiego); 
     }
-  }
 }
 
 void InitWiFi() {
   WiFi.begin(SSID, PASS);                 // Inicializamos el WiFi con nuestras credenciales.
-
   Serial.print("Conectando a ");
   Serial.print(SSID);
   while(WiFi.status() != WL_CONNECTED){  
@@ -571,26 +621,26 @@ void mailSmartDripOn(){
   ESP_MAIL_PRINTF("Liberar memoria: %d/n", MailClient.getFreeHeap()); 
 }
 
-/* void mailErrorValve(){
-  String textMsg = "Error en la electrovávula de riego. \n" +
-                   "Los sensores indican que el agua continúa fluyendo. \n" +
-                   "Por favor revise la instalación lo antes posible.";
-  mailDripOn.text.content = textMsg.c_str();
-  mailDripOn.text.charSet = "us-ascii";
-  mailDripOn.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
-  mailDripOn.priority = esp_mail_smtp_priority::esp_mail_smtp_priority_normal;
+void mailErrorValve(){
+  String textMsg = "Error en la electrovávula de riego. Se detiene el proceso de riego automático. Revise la instalación lo antes posible. \n";
+                   /* "Los sensores indican que el agua continúa fluyendo. \n" +
+                   "Por favor revise la instalación lo antes posible."; */
+  mailErrValve.text.content = textMsg.c_str();
+  mailErrValve.text.charSet = "us-ascii";
+  mailErrValve.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
+  mailErrValve.priority = esp_mail_smtp_priority::esp_mail_smtp_priority_normal;
 
    if(!smtp.connect(&session))
     return;
 
-  if(!MailClient.sendMail(&smtp, &mailErrV))
+  if(!MailClient.sendMail(&smtp, &mailErrValve))
     Serial.println("Error envío Email, " + smtp.errorReason());
 
   ESP_MAIL_PRINTF("Liberar memoria: %d/n", MailClient.getFreeHeap()); 
-} */
+} 
 
 void mailErrorDHT11(){
-  String textMsg = "El sensor de medio ambiente está desconectado o dañado";
+  String textMsg = "El sensor de datos ambientales está desconectado o dañado";
   mailErrorDHT.text.content = textMsg.c_str();
   mailErrorDHT.text.charSet = "us-ascii";
   mailErrorDHT.text.transfer_encoding = Content_Transfer_Encoding::enc_7bit;
